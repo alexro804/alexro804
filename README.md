@@ -3,7 +3,6 @@
 
 - 🌱 Estou aprendendo desenvolvimento de Games em Blockchain
 - 📫 How to reach me: alex.souza.rod@gmail.com
-- 😄 Pronouns: Ele/dele
 - ⚡ Fun fact: Gosto de jogos mas não tenho videogame.
 
 <div align="center">
