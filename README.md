@@ -1,7 +1,7 @@
 ### E aí ! 👋
 
 
-- 🌱 Estou aprendendo desenvolvimento de Games
+- 🌱 Estou aprendendo desenvolvimento em .net.
 - 📫 How to reach me: alex.souza.rod@gmail.com
 - ⚡ Fun fact: Gosto de jogos mas não tenho videogame.
 
