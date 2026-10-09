@@ -15,7 +15,7 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  canvas { display: block; width: 100vw; height: 100vh; }
+  canvas { display: block; width: 100%; height: 100%; }
 </style>
 </head>
 <body>
@@ -133,8 +133,8 @@ function ajustarTamanho() {
   // Telas de alta definição (celulares, Macs) têm mais pixels por ponto;
   // levamos isso em conta para o desenho não ficar borrado.
   const densidade = window.devicePixelRatio || 1;
-  LARGURA = window.innerWidth;
-  ALTURA  = window.innerHeight;
+  LARGURA = tela.clientWidth  || window.innerWidth;
+  ALTURA  = tela.clientHeight || window.innerHeight;
   tela.width  = LARGURA * densidade;
   tela.height = ALTURA  * densidade;
   pincel.setTransform(densidade, 0, 0, densidade, 0, 0);
@@ -297,7 +297,7 @@ window.addEventListener('keydown', (evento) => {
 let toqueInicioY = null;
 tela.addEventListener('touchstart', (e) => {
   e.preventDefault();
-  if (situacao !== 'jogando') { iniciarOuReiniciar(); return; }
+  if (situacao !== 'jogando') return;   // na tela inicial, o jogo começa ao SOLTAR o dedo (veja abaixo)
   toqueInicioY = e.changedTouches[0].clientY;
 }, { passive: false });
 
@@ -314,6 +314,8 @@ tela.addEventListener('touchmove', (e) => {
 
 tela.addEventListener('touchend', (e) => {
   e.preventDefault();
+  // O iPhone só libera o som quando o dedo é solto, por isso começamos aqui.
+  if (situacao !== 'jogando') { iniciarOuReiniciar(); return; }
   if (toqueInicioY !== null) acao('pulo');   // não arrastou: foi um toque simples
   toqueInicioY = null;
 }, { passive: false });
