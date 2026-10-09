@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Corrida no Ritmo</title>
+<style>
+  /* Aparência da página: fundo escuro, sem margens, o jogo ocupa a tela toda. */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: #120b24;
+    overflow: hidden;
+    touch-action: none;          /* impede o celular de rolar/dar zoom ao tocar */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="tela"></canvas>
+
+<script>
+/* =====================================================================
+   CORRIDA NO RITMO — um jogo de plataforma musical
+   ---------------------------------------------------------------------
+   Como funciona, em poucas palavras:
+   - O personagem corre sozinho. Você só decide QUANDO pular ou deslizar.
+   - Tudo no jogo segue o "relógio da música": em vez de contar quadros,
+     o jogo pergunta "em que segundo da música estamos?" e desenha cada
+     coisa no lugar certo para aquele segundo. Assim nada sai do ritmo,
+     mesmo que o computador fique lento por um instante.
+   ===================================================================== */
+
+
+/* =====================================================================
+   1) MAPA DE BATIDAS  —  ESTA É A PARTE PARA VOCÊ EDITAR
+   ---------------------------------------------------------------------
+   Cada linha é um obstáculo:
+     tempo: em que segundo da música ele chega no personagem
+     tipo:  'baixo' = obstáculo no chão   -> você precisa PULAR
+            'alto'  = obstáculo suspenso  -> você precisa DESLIZAR
+
+   No metrônomo de 100 batidas por minuto, cada batida dura 0,6 segundo.
+   Então as batidas caem em 0,6 · 1,2 · 1,8 · 2,4 · 3,0 · 3,6 ... segundos.
+   Dica: use os números da tabela abaixo para ficar sempre em cima da batida.
+
+     batida:   1    2    3    4    5    6    7    8    9   10
+     segundo: 0.6  1.2  1.8  2.4  3.0  3.6  4.2  4.8  5.4  6.0
+     (e assim por diante: batida N = N x 0,6)
+
+   Você pode apagar, acrescentar ou mudar linhas à vontade.
+   A ordem não importa: o jogo organiza sozinho.
+   ===================================================================== */
+const MAPA_DE_BATIDAS = [
+  // --- Aquecimento: um obstáculo a cada 4 batidas (1 por compasso) ---
+  { tempo:  4.8, tipo: 'baixo' },
+  { tempo:  7.2, tipo: 'baixo' },
+  { tempo:  9.6, tipo: 'alto'  },
+  { tempo: 12.0, tipo: 'alto'  },
+
+  // --- A cada 2 batidas ---
+  { tempo: 14.4, tipo: 'baixo' },
+  { tempo: 15.6, tipo: 'alto'  },
+  { tempo: 16.8, tipo: 'baixo' },
+  { tempo: 18.0, tipo: 'alto'  },
+  { tempo: 19.2, tipo: 'baixo' },
+  { tempo: 20.4, tipo: 'baixo' },
+  { tempo: 21.6, tipo: 'alto'  },
+  { tempo: 22.8, tipo: 'alto'  },
+
+  // --- Mais rápido: em toda batida por um trecho ---
+  { tempo: 24.0, tipo: 'baixo' },
+  { tempo: 24.6, tipo: 'alto'  },
+  { tempo: 25.2, tipo: 'baixo' },
+  { tempo: 25.8, tipo: 'alto'  },
+  { tempo: 27.0, tipo: 'baixo' },
+  { tempo: 28.2, tipo: 'baixo' },
+  { tempo: 28.8, tipo: 'baixo' },
+  { tempo: 29.4, tipo: 'alto'  },
+  { tempo: 30.0, tipo: 'alto'  },
+
+  // --- Final ---
+  { tempo: 31.2, tipo: 'baixo' },
+  { tempo: 32.4, tipo: 'alto'  },
+  { tempo: 33.6, tipo: 'baixo' },
+  { tempo: 34.2, tipo: 'alto'  },
+  { tempo: 34.8, tipo: 'baixo' },
+  { tempo: 36.0, tipo: 'alto'  },
+];
+
+
+/* =====================================================================
+   2) AJUSTES DO JOGO (pode mexer também, se quiser)
+   ===================================================================== */
+const BATIDAS_POR_MINUTO = 100;     // velocidade do metrônomo
+const DURACAO_DA_FASE    = 40;      // em segundos: quando a fase termina
+const TEMPO_DE_VIAGEM    = 2.0;     // quantos segundos um obstáculo leva da borda direita até o personagem
+                                    // (número maior = obstáculos mais lentos e fáceis de ler)
+const JANELA_PERFEITO    = 0.07;    // acertar a menos de 0,07 s da batida = "PERFEITO!"
+const JANELA_BOM         = 0.15;    // acertar a menos de 0,15 s da batida = "BOM"
+const PONTOS_PERFEITO    = 100;
+const PONTOS_BOM         = 50;
+const PONTOS_ERRO        = -30;     // errar tira pontos, mas o jogo continua
+
+// AJUSTE DE ATRASO: alguns fones (principalmente Bluetooth) tocam o som um
+// pouquinho atrasado. Se você sente que precisa apertar "depois" do clique,
+// aumente este número (ex.: 0.05, 0.1). Se precisa apertar "antes", diminua.
+const AJUSTE_DE_ATRASO   = 0.0;
+
+// Duração em segundos de cada movimento do personagem.
+const DURACAO_PULO       = 0.5;
+const DURACAO_DESLIZE    = 0.5;
+
+// Quanto dura uma batida, em segundos (100 bpm -> 60 / 100 = 0,6 s).
+const DURACAO_DA_BATIDA = 60 / BATIDAS_POR_MINUTO;
+
+
+/* =====================================================================
+   3) PREPARANDO A TELA DE DESENHO (o "Canvas")
+   ---------------------------------------------------------------------
+   O Canvas é como uma folha em branco onde o programa pinta tudo,
+   muitas vezes por segundo. Aqui ajustamos o tamanho dela à janela.
+   ===================================================================== */
+const tela   = document.getElementById('tela');
+const pincel = tela.getContext('2d');   // o "pincel" que desenha na tela
+let LARGURA = 0, ALTURA = 0;            // tamanho da tela (atualizado abaixo)
+let CHAO_Y  = 0;                        // altura (em pixels) onde fica o chão
+let HEROI_X = 0;                        // posição horizontal fixa do personagem
+
+function ajustarTamanho() {
+  // Telas de alta definição (celulares, Macs) têm mais pixels por ponto;
+  // levamos isso em conta para o desenho não ficar borrado.
+  const densidade = window.devicePixelRatio || 1;
+  LARGURA = window.innerWidth;
+  ALTURA  = window.innerHeight;
+  tela.width  = LARGURA * densidade;
+  tela.height = ALTURA  * densidade;
+  pincel.setTransform(densidade, 0, 0, densidade, 0, 0);
+
+  CHAO_Y  = ALTURA * 0.75;            // o chão fica a 3/4 da altura
+  HEROI_X = Math.max(90, LARGURA * 0.2); // o herói fica a 1/5 da largura
+}
+window.addEventListener('resize', ajustarTamanho);
+ajustarTamanho();
+
+
+/* =====================================================================
+   4) O SOM: METRÔNOMO FEITO PELO PRÓPRIO NAVEGADOR
+   ---------------------------------------------------------------------
+   Usamos a "Web Audio API", que é um mini-estúdio de som embutido no
+   navegador. Ela tem um relógio muito preciso (audio.currentTime), e é
+   ESSE relógio que manda no jogo inteiro.
+
+   Para tocar o metrônomo, criamos um "bip" curtinho para cada batida e
+   agendamos todos de uma vez, cada um no seu segundo exato.
+   ===================================================================== */
+let audio = null;          // o "estúdio de som" (só pode ser criado após um clique)
+let inicioDaMusica = 0;    // em que instante do relógio de áudio a música começou
+
+function tocarClique(quando, forte) {
+  // Um "oscilador" gera um tom puro, como um apito.
+  const tom    = audio.createOscillator();
+  // O "ganho" controla o volume; fazemos ele cair rápido para virar um "tic".
+  const volume = audio.createGain();
+
+  tom.frequency.value = forte ? 1500 : 1000;   // a primeira batida do compasso é mais aguda
+  volume.gain.setValueAtTime(forte ? 0.6 : 0.35, quando);
+  volume.gain.exponentialRampToValueAtTime(0.001, quando + 0.05);
+
+  tom.connect(volume);
+  volume.connect(audio.destination);           // "destination" = as caixas de som
+  tom.start(quando);
+  tom.stop(quando + 0.06);
+}
+
+function tocarSomDeAcerto() {
+  // Um "plim" agudo e curto, para reforçar o acerto.
+  const agora  = audio.currentTime;
+  const tom    = audio.createOscillator();
+  const volume = audio.createGain();
+  tom.type = 'triangle';
+  tom.frequency.setValueAtTime(880, agora);
+  tom.frequency.exponentialRampToValueAtTime(1760, agora + 0.08);
+  volume.gain.setValueAtTime(0.15, agora);
+  volume.gain.exponentialRampToValueAtTime(0.001, agora + 0.15);
+  tom.connect(volume); volume.connect(audio.destination);
+  tom.start(agora); tom.stop(agora + 0.16);
+}
+
+function tocarSomDeErro() {
+  // Um "bzzt" grave, para indicar o erro.
+  const agora  = audio.currentTime;
+  const tom    = audio.createOscillator();
+  const volume = audio.createGain();
+  tom.type = 'sawtooth';
+  tom.frequency.setValueAtTime(140, agora);
+  volume.gain.setValueAtTime(0.12, agora);
+  volume.gain.exponentialRampToValueAtTime(0.001, agora + 0.2);
+  tom.connect(volume); volume.connect(audio.destination);
+  tom.start(agora); tom.stop(agora + 0.21);
+}
+
+function comecarMetronomo() {
+  // Pequena folga de meio segundo para o navegador se preparar.
+  inicioDaMusica = audio.currentTime + 0.5;
+  // Agenda um clique em cada batida até o fim da fase.
+  const totalDeBatidas = Math.floor(DURACAO_DA_FASE / DURACAO_DA_BATIDA);
+  for (let n = 0; n <= totalDeBatidas; n++) {
+    tocarClique(inicioDaMusica + n * DURACAO_DA_BATIDA, n % 4 === 0);
+  }
+}
+
+/* O RELÓGIO MESTRE: devolve "em que segundo da música estamos agora".
+   Todo o resto do jogo usa só esta função para saber o tempo.
+
+   >>> PARA USAR UMA MÚSICA DE VERDADE no lugar do metrônomo:
+       1. Coloque no HTML:  <audio id="musica" src="minha-musica.mp3"></audio>
+       2. Em comecarMetronomo(), troque os cliques por:
+              document.getElementById('musica').play();
+       3. Aqui embaixo, troque a conta por:
+              return document.getElementById('musica').currentTime - AJUSTE_DE_ATRASO;
+       4. Ajuste BATIDAS_POR_MINUTO para o ritmo da música e refaça o mapa. */
+function tempoDaMusica() {
+  if (!audio) return 0;
+  return audio.currentTime - inicioDaMusica - AJUSTE_DE_ATRASO;
+}
+
+
+/* =====================================================================
+   5) O ESTADO DO JOGO: tudo que o jogo precisa "lembrar"
+   ===================================================================== */
+let situacao = 'menu';     // 'menu' (tela inicial), 'jogando' ou 'fim'
+let pontos   = 0;
+let sequencia = 0;         // quantos acertos seguidos (o "combo")
+let melhorSequencia = 0;
+let contagem = { perfeito: 0, bom: 0, erro: 0 };
+let obstaculos = [];       // cópia do mapa, com anotações de acerto/erro
+
+// O personagem: guarda QUANDO começou cada movimento.
+// (Como tudo segue o relógio da música, basta saber o instante de início.)
+const heroi = {
+  inicioPulo:    -99,   // segundo em que o último pulo começou
+  inicioDeslize: -99,   // segundo em que o último deslize começou
+  tropeco:       -99,   // segundo do último erro (para o personagem piscar)
+};
+
+// Efeitos visuais passageiros: textos ("PERFEITO!"), faíscas e clarões.
+let textosFlutuantes = [];
+let faiscas = [];
+let clarao = { cor: '#fff', inicio: -99 };
+
+function prepararNovaPartida() {
+  pontos = 0; sequencia = 0; melhorSequencia = 0;
+  contagem = { perfeito: 0, bom: 0, erro: 0 };
+  heroi.inicioPulo = heroi.inicioDeslize = heroi.tropeco = -99;
+  textosFlutuantes = []; faiscas = [];
+  // Copiamos o mapa, colocamos em ordem de tempo e marcamos todos como "pendentes".
+  obstaculos = MAPA_DE_BATIDAS
+    .map(b => ({ tempo: b.tempo, tipo: b.tipo, resultado: 'pendente' }))
+    .sort((a, b) => a.tempo - b.tempo);
+}
+
+
+/* =====================================================================
+   6) CONTROLES: teclado e toque
+   ---------------------------------------------------------------------
+   Seta para cima / espaço / toque na tela  -> pular
+   Seta para baixo / deslizar o dedo p/ baixo -> deslizar
+   ===================================================================== */
+function iniciarOuReiniciar() {
+  // Navegadores só deixam tocar som depois de um clique/toque/tecla,
+  // por isso o "estúdio de som" é criado aqui, e não antes.
+  if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+  audio.resume();
+  prepararNovaPartida();
+  comecarMetronomo();
+  situacao = 'jogando';
+}
+
+window.addEventListener('keydown', (evento) => {
+  if (evento.repeat) return;   // ignora a repetição automática de tecla segurada
+  const tecla = evento.key;
+  if (['ArrowUp', 'ArrowDown', ' '].includes(tecla)) evento.preventDefault();
+
+  if (situacao !== 'jogando') {
+    if (tecla === 'Enter' || tecla === ' ' || tecla === 'ArrowUp') iniciarOuReiniciar();
+    return;
+  }
+  if (tecla === 'ArrowUp' || tecla === ' ' || tecla === 'w') acao('pulo');
+  if (tecla === 'ArrowDown' || tecla === 's')                acao('deslize');
+});
+
+// Toque: guardamos onde o dedo encostou. Se ele arrastar para baixo, é deslize;
+// se só tocar, é pulo.
+let toqueInicioY = null;
+tela.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (situacao !== 'jogando') { iniciarOuReiniciar(); return; }
+  toqueInicioY = e.changedTouches[0].clientY;
+}, { passive: false });
+
+tela.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (toqueInicioY === null) return;
+  // Arrastou mais de 30 pixels para baixo? Então é deslize — e já age na hora,
+  // sem esperar soltar o dedo, para não perder o tempo da batida.
+  if (e.changedTouches[0].clientY - toqueInicioY > 30) {
+    acao('deslize');
+    toqueInicioY = null;
+  }
+}, { passive: false });
+
+tela.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (toqueInicioY !== null) acao('pulo');   // não arrastou: foi um toque simples
+  toqueInicioY = null;
+}, { passive: false });
+
+// Clique do mouse funciona como toque (útil para testar no computador).
+tela.addEventListener('mousedown', () => {
+  if (situacao !== 'jogando') iniciarOuReiniciar();
+  else acao('pulo');
+});
+
+
+/* =====================================================================
+   7) O JULGAMENTO: o jogador acertou o tempo?
+   ---------------------------------------------------------------------
+   Quando o jogador aperta um botão, procuramos o obstáculo pendente mais
+   próximo do momento atual. Se a ação é a certa para ele e a diferença
+   de tempo é pequena, é acerto. Se o obstáculo passa sem a ação certa,
+   é erro (isso é checado em verificarErros, mais abaixo).
+   ===================================================================== */
+function acao(tipoDeAcao) {
+  const agora = tempoDaMusica();
+
+  // 1) Faz o personagem se mexer (sempre, acertando ou não).
+  if (tipoDeAcao === 'pulo')    { heroi.inicioPulo = agora;    heroi.inicioDeslize = -99; }
+  if (tipoDeAcao === 'deslize') { heroi.inicioDeslize = agora; heroi.inicioPulo = -99; }
+
+  // 2) Qual obstáculo pede essa ação? Pulo serve para 'baixo'; deslize para 'alto'.
+  const tipoCerto = (tipoDeAcao === 'pulo') ? 'baixo' : 'alto';
+
+  // 3) Procura o obstáculo pendente desse tipo mais perto do "agora".
+  let melhor = null, menorDiferenca = Infinity;
+  for (const ob of obstaculos) {
+    if (ob.resultado !== 'pendente' || ob.tipo !== tipoCerto) continue;
+    const diferenca = Math.abs(ob.tempo - agora);
+    if (diferenca < menorDiferenca) { menorDiferenca = diferenca; melhor = ob; }
+  }
+
+  // 4) Dá a nota conforme a precisão.
+  if (melhor && menorDiferenca <= JANELA_PERFEITO) {
+    registrarAcerto(melhor, 'PERFEITO!', PONTOS_PERFEITO, '#ffe66d');
+    contagem.perfeito++;
+  } else if (melhor && menorDiferenca <= JANELA_BOM) {
+    registrarAcerto(melhor, 'BOM', PONTOS_BOM, '#7cf5ff');
+    contagem.bom++;
+  }
+  // Apertar fora de hora não é punido: o erro só conta quando um obstáculo
+  // passa sem ser superado. Isso deixa o jogo mais amigável.
+}
+
+function registrarAcerto(ob, texto, valor, cor) {
+  ob.resultado = 'acerto';
+  sequencia++;
+  melhorSequencia = Math.max(melhorSequencia, sequencia);
+  // Bônus de combo: a cada 10 acertos seguidos, os pontos aumentam um pouco.
+  const bonus = 1 + Math.floor(sequencia / 10) * 0.5;
+  pontos += Math.round(valor * bonus);
+
+  textosFlutuantes.push({ texto, cor, inicio: tempoDaMusica() });
+  clarao = { cor, inicio: tempoDaMusica() };
+  soltarFaiscas(cor);
+  tocarSomDeAcerto();
+}
+
+function verificarErros(agora) {
+  // Qualquer obstáculo pendente cuja batida já passou além da janela vira erro.
+  for (const ob of obstaculos) {
+    if (ob.resultado === 'pendente' && agora - ob.tempo > JANELA_BOM) {
+      ob.resultado = 'erro';
+      contagem.erro++;
+      sequencia = 0;
+      pontos = Math.max(0, pontos + PONTOS_ERRO);   // nunca fica negativo
+      heroi.tropeco = agora;
+      textosFlutuantes.push({ texto: 'ERROU', cor: '#ff5c7a', inicio: agora });
+      clarao = { cor: '#ff5c7a', inicio: agora };
+      tocarSomDeErro();
+    }
+  }
+}
+
+function soltarFaiscas(cor) {
+  // Cria 18 faíscas saindo do personagem em direções aleatórias.
+  const { y } = posicaoDoHeroi(tempoDaMusica());
+  for (let i = 0; i < 18; i++) {
+    const angulo = Math.random() * Math.PI * 2;
+    const forca  = 80 + Math.random() * 220;
+    faiscas.push({
+      x: HEROI_X, y: y - 30,
+      vx: Math.cos(angulo) * forca, vy: Math.sin(angulo) * forca,
+      inicio: tempoDaMusica(), cor,
+    });
+  }
+}
+
+
+/* =====================================================================
+   8) ONDE CADA COISA ESTÁ EM CADA INSTANTE
+   ---------------------------------------------------------------------
+   A ideia central do jogo:
+     - O personagem fica parado na horizontal (em HEROI_X); quem se mexe
+       é o cenário, dando a sensação de corrida.
+     - Um obstáculo marcado para o segundo T aparece na borda direita no
+       segundo (T - TEMPO_DE_VIAGEM) e anda em velocidade constante até
+       chegar no personagem EXATAMENTE no segundo T.
+   ===================================================================== */
+function velocidade() {
+  // Pixels por segundo necessários para cruzar da borda até o herói no tempo certo.
+  return (LARGURA + 40 - HEROI_X) / TEMPO_DE_VIAGEM;
+}
+
+function posicaoDoObstaculo(ob, agora) {
+  // Quanto tempo falta para a batida? Multiplica pela velocidade = distância.
+  const falta = ob.tempo - agora;
+  return HEROI_X + falta * velocidade();
+}
+
+function posicaoDoHeroi(agora) {
+  // Pulo: um arco suave (sobe e desce) que dura DURACAO_PULO segundos.
+  // O pico do pulo acontece no meio — então, se você aperta um pouquinho
+  // antes da batida, o personagem já está no alto quando o obstáculo chega.
+  const tPulo = (agora - heroi.inicioPulo) / DURACAO_PULO;   // vai de 0 a 1
+  let altura = 0;
+  if (tPulo >= 0 && tPulo <= 1) altura = Math.sin(tPulo * Math.PI) * 120;
+
+  const tDeslize = (agora - heroi.inicioDeslize) / DURACAO_DESLIZE;
+  const deslizando = tDeslize >= 0 && tDeslize <= 1;
+
+  return { y: CHAO_Y - altura, deslizando, pulando: altura > 0 };
+}
+
+
+/* =====================================================================
+   9) DESENHANDO CADA QUADRO
+   ===================================================================== */
+
+// Quanto o fundo está "pulsando" agora: 1 bem na batida, caindo até 0.
+function pulsacao(agora) {
+  if (agora < 0) return 0;
+  const faseDaBatida = (agora % DURACAO_DA_BATIDA) / DURACAO_DA_BATIDA; // 0 → 1
+  return Math.exp(-faseDaBatida * 5);   // decai rápido logo após cada batida
+}
+
+function desenharFundo(agora) {
+  const p = pulsacao(agora);
+
+  // Céu em degradê. A cor clareia levemente a cada batida.
+  const clareia = Math.round(p * 25);
+  const ceu = pincel.createLinearGradient(0, 0, 0, ALTURA);
+  ceu.addColorStop(0, `rgb(${40 + clareia}, ${20 + clareia}, ${80 + clareia})`);
+  ceu.addColorStop(1, `rgb(${120 + clareia}, ${50 + clareia}, ${110 + clareia})`);
+  pincel.fillStyle = ceu;
+  pincel.fillRect(0, 0, LARGURA, ALTURA);
+
+  // Um sol/lua grande que "respira" no ritmo.
+  const raio = Math.min(LARGURA, ALTURA) * 0.16 * (1 + p * 0.06);
+  pincel.fillStyle = `rgba(255, 200, 120, ${0.25 + p * 0.15})`;
+  pincel.beginPath();
+  pincel.arc(LARGURA * 0.72, ALTURA * 0.35, raio, 0, Math.PI * 2);
+  pincel.fill();
+
+  // Montanhas ao fundo (andam devagar = parecem longe).
+  const deslocLonge = (Math.max(agora, 0) * velocidade() * 0.2) % 300;
+  pincel.fillStyle = '#3b2366';
+  for (let x = -deslocLonge - 300; x < LARGURA + 300; x += 300) {
+    pincel.beginPath();
+    pincel.moveTo(x, CHAO_Y);
+    pincel.lineTo(x + 150, CHAO_Y - 160 - p * 8);   // os picos "pulam" de leve
+    pincel.lineTo(x + 300, CHAO_Y);
+    pincel.fill();
+  }
+
+  // Colunas no meio (andam mais rápido = parecem mais perto).
+  const deslocMeio = (Math.max(agora, 0) * velocidade() * 0.5) % 180;
+  pincel.fillStyle = '#4e2c80';
+  for (let x = -deslocMeio; x < LARGURA + 180; x += 180) {
+    const h = 70 + p * 10;
+    pincel.fillRect(x, CHAO_Y - h, 40, h);
+  }
+
+  // Chão: anda na mesma velocidade dos obstáculos.
+  pincel.fillStyle = '#2a1846';
+  pincel.fillRect(0, CHAO_Y, LARGURA, ALTURA - CHAO_Y);
+  pincel.fillStyle = `rgba(255, 120, 200, ${0.5 + p * 0.5})`;  // linha do chão brilha na batida
+  pincel.fillRect(0, CHAO_Y, LARGURA, 4);
+
+  // Marcas no chão, uma a cada batida: ajudam a "ver" o ritmo.
+  pincel.fillStyle = 'rgba(255, 255, 255, 0.15)';
+  const espacoEntreMarcas = velocidade() * DURACAO_DA_BATIDA;
+  const deslocChao = (Math.max(agora, 0) * velocidade()) % espacoEntreMarcas;
+  for (let x = HEROI_X - deslocChao; x < LARGURA; x += espacoEntreMarcas) {
+    pincel.fillRect(x - 2, CHAO_Y + 10, 4, 16);
+  }
+  for (let x = HEROI_X - deslocChao - espacoEntreMarcas; x > -10; x -= espacoEntreMarcas) {
+    pincel.fillRect(x - 2, CHAO_Y + 10, 4, 16);
+  }
+}
+
+function desenharObstaculos(agora) {
+  for (const ob of obstaculos) {
+    const x = posicaoDoObstaculo(ob, agora);
+    if (x > LARGURA + 60 || x < -80) continue;   // fora da tela: não desenha
+
+    // Cor conforme o resultado: normal, acertado (some aos poucos) ou errado.
+    let transparencia = 1;
+    if (ob.resultado === 'acerto') transparencia = Math.max(0, 1 - (agora - ob.tempo) * 3);
+    if (transparencia <= 0) continue;
+    pincel.globalAlpha = transparencia;
+
+    if (ob.tipo === 'baixo') {
+      // Obstáculo no chão: um bloco com espinhos. Pede PULO.
+      pincel.fillStyle = ob.resultado === 'erro' ? '#7a3b4a' : '#ff7b54';
+      pincel.fillRect(x - 22, CHAO_Y - 40, 44, 40);
+      pincel.fillStyle = ob.resultado === 'erro' ? '#5a2b3a' : '#ffd166';
+      for (let i = 0; i < 3; i++) {
+        pincel.beginPath();
+        pincel.moveTo(x - 22 + i * 15,      CHAO_Y - 40);
+        pincel.lineTo(x - 22 + i * 15 + 7,  CHAO_Y - 56);
+        pincel.lineTo(x - 22 + i * 15 + 14, CHAO_Y - 40);
+        pincel.fill();
+      }
+      // Setinha indicando "pule".
+      desenharSeta(x, CHAO_Y - 80, 'cima', ob.resultado);
+    } else {
+      // Obstáculo suspenso: uma viga pendurada. Pede DESLIZE.
+      const base = CHAO_Y - 38;   // espaço livre embaixo só para quem desliza
+      pincel.strokeStyle = 'rgba(255,255,255,0.35)';
+      pincel.lineWidth = 3;
+      pincel.beginPath(); pincel.moveTo(x, 0); pincel.lineTo(x, base - 60); pincel.stroke();
+      pincel.fillStyle = ob.resultado === 'erro' ? '#3e4a7a' : '#5ec8ff';
+      pincel.fillRect(x - 28, base - 60, 56, 60);
+      pincel.fillStyle = ob.resultado === 'erro' ? '#2d355a' : '#2a7bbd';
+      pincel.fillRect(x - 28, base - 10, 56, 10);
+      desenharSeta(x, base - 90, 'baixo', ob.resultado);
+    }
+    pincel.globalAlpha = 1;
+  }
+}
+
+function desenharSeta(x, y, direcao, resultado) {
+  if (resultado !== 'pendente') return;
+  pincel.fillStyle = 'rgba(255,255,255,0.8)';
+  pincel.beginPath();
+  if (direcao === 'cima') {
+    pincel.moveTo(x - 10, y + 6); pincel.lineTo(x, y - 8); pincel.lineTo(x + 10, y + 6);
+  } else {
+    pincel.moveTo(x - 10, y - 6); pincel.lineTo(x, y + 8); pincel.lineTo(x + 10, y - 6);
+  }
+  pincel.fill();
+}
+
+function desenharHeroi(agora) {
+  const { y, deslizando, pulando } = posicaoDoHeroi(agora);
+  const x = HEROI_X;
+
+  // Depois de um erro, o personagem pisca por meio segundo.
+  const piscando = agora - heroi.tropeco < 0.5 && Math.floor(agora * 20) % 2 === 0;
+  if (piscando) pincel.globalAlpha = 0.4;
+
+  // Brilho em volta do personagem logo após um acerto.
+  const tempoDesdeClarao = agora - clarao.inicio;
+  if (tempoDesdeClarao >= 0 && tempoDesdeClarao < 0.4 && clarao.cor !== '#ff5c7a') {
+    pincel.shadowColor = clarao.cor;
+    pincel.shadowBlur  = 40 * (1 - tempoDesdeClarao / 0.4);
+  }
+
+  // Sombra no chão (fica menor quando ele está no ar).
+  pincel.fillStyle = 'rgba(0,0,0,0.3)';
+  pincel.beginPath();
+  pincel.ellipse(x, CHAO_Y + 2, 22 - (CHAO_Y - y) * 0.08, 5, 0, 0, Math.PI * 2);
+  pincel.fill();
+
+  // As perninhas alternam no ritmo da batida, como se ele corresse na música.
+  const passo = Math.sin((agora / DURACAO_DA_BATIDA) * Math.PI * 2) * 8;
+
+  if (deslizando) {
+    // Deslizando: corpo deitado, rente ao chão.
+    pincel.fillStyle = '#ffcc4d';
+    pincel.beginPath();
+    pincel.ellipse(x, y - 14, 30, 14, 0, 0, Math.PI * 2);
+    pincel.fill();
+    // Olho
+    pincel.fillStyle = '#222';
+    pincel.beginPath(); pincel.arc(x + 16, y - 18, 3.5, 0, Math.PI * 2); pincel.fill();
+    // Rastro de poeira
+    pincel.fillStyle = 'rgba(255,255,255,0.4)';
+    for (let i = 1; i <= 3; i++) {
+      pincel.beginPath(); pincel.arc(x - 30 - i * 12, y - 4, 6 - i, 0, Math.PI * 2); pincel.fill();
+    }
+  } else {
+    // Em pé: pernas, corpo redondinho, olhos e cachecol esvoaçante.
+    pincel.strokeStyle = '#ffcc4d';
+    pincel.lineWidth = 6;
+    pincel.lineCap = 'round';
+    pincel.beginPath();
+    const p1 = pulando ? -6 : passo;
+    const p2 = pulando ?  6 : -passo;
+    pincel.moveTo(x - 6, y - 18); pincel.lineTo(x - 6 + p1, y - 2);
+    pincel.moveTo(x + 6, y - 18); pincel.lineTo(x + 6 + p2, y - 2);
+    pincel.stroke();
+
+    pincel.fillStyle = '#ffcc4d';
+    pincel.beginPath(); pincel.arc(x, y - 38, 22, 0, Math.PI * 2); pincel.fill();
+
+    pincel.fillStyle = '#fff';
+    pincel.beginPath(); pincel.arc(x + 8, y - 44, 7, 0, Math.PI * 2); pincel.fill();
+    pincel.fillStyle = '#222';
+    pincel.beginPath(); pincel.arc(x + 10, y - 44, 3.5, 0, Math.PI * 2); pincel.fill();
+
+    // Cachecol balançando ao vento.
+    pincel.strokeStyle = '#ff4d8d';
+    pincel.lineWidth = 5;
+    pincel.beginPath();
+    pincel.moveTo(x - 10, y - 28);
+    pincel.quadraticCurveTo(x - 28, y - 30 + passo, x - 42, y - 24 - passo);
+    pincel.stroke();
+  }
+
+  pincel.shadowBlur = 0;
+  pincel.globalAlpha = 1;
+}
+
+function desenharEfeitos(agora) {
+  // Clarão que cobre a tela inteira por um instante (dourado no acerto, vermelho no erro).
+  const t = agora - clarao.inicio;
+  if (t >= 0 && t < 0.25) {
+    pincel.fillStyle = clarao.cor;
+    pincel.globalAlpha = 0.18 * (1 - t / 0.25);
+    pincel.fillRect(0, 0, LARGURA, ALTURA);
+    pincel.globalAlpha = 1;
+  }
+
+  // Faíscas: cada uma voa e cai com "gravidade", sumindo em 0,6 s.
+  faiscas = faiscas.filter(f => agora - f.inicio < 0.6);
+  for (const f of faiscas) {
+    const dt = agora - f.inicio;
+    const fx = f.x + f.vx * dt;
+    const fy = f.y + f.vy * dt + 400 * dt * dt;
+    pincel.globalAlpha = 1 - dt / 0.6;
+    pincel.fillStyle = f.cor;
+    pincel.beginPath(); pincel.arc(fx, fy, 4, 0, Math.PI * 2); pincel.fill();
+  }
+  pincel.globalAlpha = 1;
+
+  // Textos que sobem e somem ("PERFEITO!", "BOM", "ERROU").
+  textosFlutuantes = textosFlutuantes.filter(tx => agora - tx.inicio < 0.8);
+  pincel.textAlign = 'center';
+  pincel.font = 'bold 28px system-ui, sans-serif';
+  for (const tx of textosFlutuantes) {
+    const dt = agora - tx.inicio;
+    pincel.globalAlpha = 1 - dt / 0.8;
+    pincel.fillStyle = tx.cor;
+    pincel.fillText(tx.texto, HEROI_X, CHAO_Y - 150 - dt * 60);
+  }
+  pincel.globalAlpha = 1;
+}
+
+function desenharPlacar(agora) {
+  pincel.textAlign = 'left';
+  pincel.fillStyle = '#fff';
+  pincel.font = 'bold 26px system-ui, sans-serif';
+  pincel.fillText(`Pontos: ${pontos}`, 20, 40);
+  pincel.font = '18px system-ui, sans-serif';
+  pincel.fillText(`Sequência: ${sequencia}`, 20, 66);
+
+  // Barra de progresso da fase.
+  const progresso = Math.min(Math.max(agora / DURACAO_DA_FASE, 0), 1);
+  pincel.fillStyle = 'rgba(255,255,255,0.2)';
+  pincel.fillRect(20, 80, 200, 6);
+  pincel.fillStyle = '#ff4d8d';
+  pincel.fillRect(20, 80, 200 * progresso, 6);
+
+  // Contagem regressiva antes da primeira batida.
+  if (agora < 0) {
+    pincel.textAlign = 'center';
+    pincel.font = 'bold 40px system-ui, sans-serif';
+    pincel.fillText('Prepare-se...', LARGURA / 2, ALTURA * 0.3);
+  }
+}
+
+function desenharTelaDeMensagem(titulo, linhas) {
+  pincel.fillStyle = 'rgba(10, 5, 25, 0.75)';
+  pincel.fillRect(0, 0, LARGURA, ALTURA);
+  pincel.textAlign = 'center';
+  pincel.fillStyle = '#ffcc4d';
+  pincel.font = `bold ${Math.min(52, LARGURA / 12)}px system-ui, sans-serif`;
+  pincel.fillText(titulo, LARGURA / 2, ALTURA * 0.3);
+  pincel.fillStyle = '#fff';
+  pincel.font = `${Math.min(22, LARGURA / 24)}px system-ui, sans-serif`;
+  linhas.forEach((linha, i) => pincel.fillText(linha, LARGURA / 2, ALTURA * 0.42 + i * 34));
+}
+
+
+/* =====================================================================
+   10) O LAÇO PRINCIPAL: roda ~60 vezes por segundo
+   ---------------------------------------------------------------------
+   A cada volta: pergunta ao relógio da música "que horas são?",
+   confere se algum obstáculo passou sem ser superado, e redesenha tudo.
+   ===================================================================== */
+function quadro() {
+  const agora = (situacao === 'menu') ? performance.now() / 1000 : tempoDaMusica();
+
+  if (situacao === 'jogando') {
+    verificarErros(agora);
+    if (agora > DURACAO_DA_FASE) situacao = 'fim';
+  }
+
+  desenharFundo(agora);
+  if (situacao !== 'menu') {
+    desenharObstaculos(agora);
+    desenharHeroi(agora);
+    desenharEfeitos(agora);
+    desenharPlacar(agora);
+  } else {
+    desenharHeroi(agora);
+  }
+
+  if (situacao === 'menu') {
+    desenharTelaDeMensagem('Corrida no Ritmo', [
+      'Pule (↑ ou toque) os blocos do chão.',
+      'Deslize (↓ ou arraste o dedo pra baixo) sob as vigas.',
+      'Aja no clique do metrônomo!',
+      '',
+      'Toque, clique ou aperte Enter para começar',
+    ]);
+  } else if (situacao === 'fim') {
+    desenharTelaDeMensagem('Fim da fase!', [
+      `Pontos: ${pontos}`,
+      `Perfeitos: ${contagem.perfeito}   Bons: ${contagem.bom}   Erros: ${contagem.erro}`,
+      `Maior sequência: ${melhorSequencia}`,
+      '',
+      'Toque, clique ou aperte Enter para jogar de novo',
+    ]);
+  }
+
+  requestAnimationFrame(quadro);   // pede para rodar de novo no próximo quadro
+}
+
+requestAnimationFrame(quadro);    // dá a partida no jogo
+</script>
+</body>
+</html>
